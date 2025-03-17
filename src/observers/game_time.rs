@@ -10,8 +10,7 @@ pub struct GameTime {
 #[observer]
 impl GameTime {
     pub fn start_time(&self) -> Result<f32> {
-        self.start_time
-            .ok_or_else(|| anyhow!("Game has not started yet."))
+        self.start_time.ok_or_else(|| anyhow!("Game has not started yet."))
     }
 
     pub fn tick(&self, ctx: &Context) -> Result<i32> {

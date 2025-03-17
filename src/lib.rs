@@ -62,27 +62,27 @@ impl App {
         if let Ok(start_time) = self.game_time.borrow().start_time() {
             while let Some((ward, tick, event)) = self.pending_entries.pop_front() {
                 let handle = ward.handle();
+                let entry = self.handle_to_entry[&handle];
+                let placed_tick = entry.placed_tick;
+                let duration = (((tick - placed_tick) as f32) / 30.0) as i32;
+                let time_placed = (placed_tick as f32 / 30.0 - start_time) as i32;
+                let hero_placed = ctx.entities().get_by_handle(entry.hero_handle)?.class().name();
+
                 let output = Output {
-                    time_placed: (self.handle_to_entry[&handle].placed_tick as f32 / 30.0 - start_time) as i32,
-                    duration: (((tick - self.handle_to_entry[&handle].placed_tick) as f32) / 30.0) as i32,
-                    is_obs: self.handle_to_entry[&handle].is_observer,
-                    is_radiant: self.handle_to_entry[&handle].is_radiant,
-                    event: match event {
-                        WardEvent::Killed(_) => "killed".to_string(),
-                        WardEvent::Expired => "expired".to_string(),
-                        _ => unreachable!(),
-                    },
+                    time_placed,
+                    duration,
+                    is_obs: entry.is_observer,
+                    is_radiant: entry.is_radiant,
+                    event: event.to_string(),
                     post_game: false,
-                    player_placed_steam_id: self.players.borrow().hero_to_player[ctx.entities().get_by_handle(self.handle_to_entry[&handle].hero_handle)?.class().name()].borrow().id,
-                    player_destroyed_steam_id: if let WardEvent::Killed(killer) = &event {
-                        self.players.borrow().hero_to_player.get(killer).map(|x| x.borrow().id)
-                    } else {
-                        None
+                    player_placed_steam_id: self.players.borrow().hero_to_player[hero_placed].borrow().id,
+                    player_destroyed_steam_id: match &event {
+                        WardEvent::Killed(killer) => self.players.borrow().hero_to_player.get(killer).map(|x| x.borrow().id),
+                        _ => None,
                     },
-                    npc_killed: if let WardEvent::Killed(killer) = &event {
-                        Some(killer.to_string())
-                    } else {
-                        None
+                    npc_killed: match &event {
+                        WardEvent::Killed(killer) => Some(killer.to_string()),
+                        _ => None,
                     },
                     x: property!(ward, "CBodyComponent.m_cellX"),
                     y: property!(ward, "CBodyComponent.m_cellY"),
@@ -99,6 +99,7 @@ impl App {
                         "m_vecDataTeam.0003.m_iNetWorth"
                     ),
                 };
+
                 self.result.push(output);
             }
         }
@@ -135,11 +136,8 @@ impl WardsObserver for App {
                 );
             }
             WardEvent::Killed(killer) => {
-                self.pending_entries.push_back((
-                    ward.clone(),
-                    self.game_time.borrow().tick(ctx)?,
-                    WardEvent::Killed(killer),
-                ));
+                self.pending_entries
+                    .push_back((ward.clone(), self.game_time.borrow().tick(ctx)?, WardEvent::Killed(killer)));
             }
             WardEvent::Expired => {
                 self.pending_entries
@@ -172,12 +170,10 @@ pub fn parse_replay(data: &[u8]) -> PyResult<Vec<Output>> {
         let x = Ok(app.borrow_mut().result.clone());
         x
     })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(format!("Panic while parsing\n{e:?}")))
-        .and_then(|x| {
-            x.map_err(|e: anyhow::Error| {
-                PyErr::new::<pyo3::exceptions::PyException, _>(format!("Error while parsing\n{e}"))
-            })
-        })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(format!("Panic while parsing\n{e:?}")))
+    .and_then(|x| {
+        x.map_err(|e: anyhow::Error| PyErr::new::<pyo3::exceptions::PyException, _>(format!("Error while parsing\n{e}")))
+    })
 }
 
 #[pymodule]

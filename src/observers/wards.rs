@@ -1,21 +1,11 @@
 use hashbrown::HashMap;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::rc::Rc;
-
 
 use source2_demo::prelude::*;
 use source2_demo::proto::DotaCombatlogTypes;
-
-#[macro_export]
-macro_rules! try_observers {
-    ($self:ident, $method:ident ( $($arg:expr),* )) => {
-        $self.observers
-            .iter()
-            .try_for_each(|obs| obs.borrow_mut().$method($($arg),*))
-    };
-}
-
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum WardClass {
@@ -28,6 +18,16 @@ pub enum WardEvent {
     Placed,
     Killed(Box<str>),
     Expired,
+}
+
+impl Display for WardEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WardEvent::Placed => write!(f, "placed"),
+            WardEvent::Killed(_) => write!(f, "killed"),
+            WardEvent::Expired => write!(f, "expired"),
+        }
+    }
 }
 
 impl WardClass {
@@ -74,24 +74,18 @@ impl Wards {
             let old_state = *self.current_life_state.get(&ev.entity_idx).unwrap_or(&2);
             let new_state = ev.life_state;
 
-            let ward_class = WardClass::from_class_name(
-                ctx.entities()
-                    .get_by_index(ev.entity_idx as usize)?
-                    .class()
-                    .name(),
-            )
-                .unwrap();
+            let ward_class =
+                WardClass::from_class_name(ctx.entities().get_by_index(ev.entity_idx as usize)?.class().name()).unwrap();
 
             let event = |event: WardEvent| -> ObserverResult {
-                try_observers!(
-                    self,
-                    on_ward(
+                self.observers.iter().try_for_each(|obs| {
+                    obs.borrow_mut().on_ward(
                         ctx,
                         ward_class,
                         event.clone(),
-                        ctx.entities().get_by_index(ev.entity_idx as usize)?
+                        ctx.entities().get_by_index(ev.entity_idx as usize)?,
                     )
-                )
+                })
             };
 
             if old_state != new_state {
@@ -115,9 +109,7 @@ impl Wards {
 
     #[on_entity]
     fn on_entity(&mut self, event: EntityEvents, entity: &Entity) -> ObserverResult {
-        if event == EntityEvents::Created
-            && WardClass::from_class_name(entity.class().name()).is_some()
-        {
+        if event == EntityEvents::Created && WardClass::from_class_name(entity.class().name()).is_some() {
             if let Ok(life_state) = entity.get_property_by_name("m_lifeState") {
                 self.current_life_state.remove(&entity.index());
                 self.pending_events.push_back(PendingEvent {
@@ -146,9 +138,7 @@ impl Wards {
             && combat_log.target_name().is_ok()
             && WardClass::from_target_name(combat_log.target_name()?).is_some()
         {
-            if let (Ok(killer), Ok(attacker)) =
-                (combat_log.damage_source_name(), combat_log.attacker_name())
-            {
+            if let (Ok(killer), Ok(attacker)) = (combat_log.damage_source_name(), combat_log.attacker_name()) {
                 if WardClass::from_target_name(attacker).is_none() {
                     self.killers
                         .get_mut(&WardClass::from_target_name(combat_log.target_name()?).unwrap())
@@ -194,13 +184,7 @@ impl Default for Wards {
 
 #[allow(unused_variables)]
 pub trait WardsObserver {
-    fn on_ward(
-        &mut self,
-        ctx: &Context,
-        ward_class: WardClass,
-        event: WardEvent,
-        ward: &Entity,
-    ) -> ObserverResult {
+    fn on_ward(&mut self, ctx: &Context, ward_class: WardClass, event: WardEvent, ward: &Entity) -> ObserverResult {
         Ok(())
     }
 }
