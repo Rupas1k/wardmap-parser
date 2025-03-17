@@ -5,10 +5,15 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use d2_stampede::prelude::*;
-use d2_stampede_observers::game_time::*;
-use d2_stampede_observers::players::*;
-use d2_stampede_observers::wards::*;
+use source2_demo::prelude::*;
+
+use crate::observers::game_time::*;
+use crate::observers::players::*;
+use crate::observers::wards::*;
+
+mod observers;
+
+pub mod utils;
 
 #[derive(Debug, Copy, Clone)]
 pub struct WardEntry {
@@ -50,8 +55,10 @@ struct App {
     result: Vec<Output>,
 }
 
-impl Observer for App {
-    fn on_tick_end(&mut self, ctx: &Context) -> ObserverResult {
+#[observer]
+impl App {
+    #[on_tick_end]
+    fn tick_end(&mut self, ctx: &Context) -> ObserverResult {
         if let Ok(start_time) = self.game_time.borrow().start_time() {
             while let Some((ward, tick, event)) = self.pending_entries.pop_front() {
                 let handle = ward.handle();
@@ -66,11 +73,9 @@ impl Observer for App {
                         _ => unreachable!(),
                     },
                     post_game: false,
-                    player_placed_steam_id: self.players.borrow().handle_to_player
-                        [&self.handle_to_entry[&handle].hero_handle]
-                        .id,
+                    player_placed_steam_id: self.players.borrow().hero_to_player[ctx.entities().get_by_handle(self.handle_to_entry[&handle].hero_handle)?.class().name()].borrow().id,
                     player_destroyed_steam_id: if let WardEvent::Killed(killer) = &event {
-                        self.players.borrow().hero_to_player.get(killer).map(|x| x.id)
+                        self.players.borrow().hero_to_player.get(killer).map(|x| x.borrow().id)
                     } else {
                         None
                     },
@@ -87,21 +92,17 @@ impl Observer for App {
                     vec_z: property!(ward, "CBodyComponent.m_vecZ"),
                     radiant_networth: property!(
                         ctx.entities().get_by_class_name("CDOTA_DataRadiant")?,
-                        "m_vecDataTeam.0003.m_iNetWorth"
+                        "m_vecDataTeam.0002.m_iNetWorth"
                     ),
                     dire_networth: property!(
                         ctx.entities().get_by_class_name("CDOTA_DataDire")?,
-                        "m_vecDataTeam.0002.m_iNetWorth"
+                        "m_vecDataTeam.0003.m_iNetWorth"
                     ),
                 };
                 self.result.push(output);
             }
         }
         Ok(())
-    }
-
-    fn epilogue(&mut self, ctx: &Context) -> ObserverResult {
-        self.on_tick_end(ctx)
     }
 }
 
@@ -121,14 +122,14 @@ impl WardsObserver for App {
                 player_slot >>= 1;
 
                 let player = &self.players.borrow().players[player_slot];
-                let hero_handle = player.hero_handle;
+                let hero_handle = player.borrow().handle;
 
                 self.handle_to_entry.insert(
                     ward.handle(),
                     WardEntry {
                         hero_handle,
                         placed_tick: self.game_time.borrow().tick(ctx)?,
-                        is_radiant: player.team == 2,
+                        is_radiant: player.borrow().team == 2,
                         is_observer: ward_class == WardClass::Observer,
                     },
                 );
@@ -166,15 +167,17 @@ pub fn parse_replay(data: &[u8]) -> PyResult<Vec<Output>> {
 
         parser.run_to_end()?;
 
+        app.borrow_mut().tick_end(parser.context())?;
+
         let x = Ok(app.borrow_mut().result.clone());
         x
     })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(format!("Panic while parsing\n{e:?}")))
-    .and_then(|x| {
-        x.map_err(|e: anyhow::Error| {
-            PyErr::new::<pyo3::exceptions::PyException, _>(format!("Error while parsing\n{e}"))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(format!("Panic while parsing\n{e:?}")))
+        .and_then(|x| {
+            x.map_err(|e: anyhow::Error| {
+                PyErr::new::<pyo3::exceptions::PyException, _>(format!("Error while parsing\n{e}"))
+            })
         })
-    })
 }
 
 #[pymodule]

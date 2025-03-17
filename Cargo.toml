@@ -8,11 +8,10 @@ crate-type = ["cdylib"]
 name = "d2wm_parser"
 
 [dependencies]
-d2-stampede = "0.1"
-d2-stampede-observers = "0.1"
-hashbrown = "0.14"
+source2-demo = { git = "https://github.com/Rupas1k/source2-demo", features = ["dota"] }
+hashbrown = "0.15"
 anyhow = "1.0"
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.23", features = ["extension-module"] }
 
 [profile.release]
 lto = "fat"
