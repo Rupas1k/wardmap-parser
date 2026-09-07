@@ -8,23 +8,17 @@ use source2_demo::proto::*;
 use crate::utils::class_to_combat_log;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Player {
     pub id: u64,
     pub team: i32,
-    pub slot: i32,
-    pub hero: Box<str>,
     pub handle: usize,
-    pub controller_handle: usize,
 }
 
 #[derive(Default)]
 pub struct Players {
     pub init: bool,
     pub players: Vec<Rc<RefCell<Player>>>,
-    pub steam_id_to_player: HashMap<u64, Rc<RefCell<Player>>>,
     pub hero_to_player: HashMap<Box<str>, Rc<RefCell<Player>>>,
-    pub owner_to_hero: HashMap<usize, usize>,
 
     is_pre_game: bool,
     pre_game_tick: Option<u32>,
@@ -40,10 +34,7 @@ impl Players {
                 while added < 10 {
                     let id: u64 = property!(pr, "m_vecPlayerData.{added:04}.m_iPlayerSteamID");
                     let team: i32 = property!(pr, "m_vecPlayerData.{added:04}.m_iPlayerTeam");
-                    let slot: i32 = property!(pr, "m_vecPlayerTeamData.{added:04}.m_iTeamSlot");
                     let handle: usize = property!(pr, "m_vecPlayerTeamData.{added:04}.m_hSelectedHero");
-
-                    let controller_handle: usize = property!(ctx.entities().get_by_handle(handle)?, "m_hOwnerEntity");
 
                     let hero_str = ctx
                         .entities()
@@ -53,14 +44,7 @@ impl Players {
                         .to_string()
                         .into_boxed_str();
 
-                    let player = Rc::new(RefCell::new(Player {
-                        id,
-                        team,
-                        slot,
-                        hero: hero_str.clone(),
-                        handle,
-                        controller_handle,
-                    }));
+                    let player = Rc::new(RefCell::new(Player { id, team, handle }));
 
                     self.players.push(player.clone());
 
@@ -68,9 +52,6 @@ impl Players {
                     for name in class_to_combat_log(&hero_str) {
                         self.hero_to_player.insert(name, player.clone());
                     }
-
-                    self.steam_id_to_player.insert(id, player.clone());
-                    self.owner_to_hero.insert(controller_handle, handle);
 
                     added += 1;
                 }

@@ -83,6 +83,7 @@ impl Wards {
                         ctx,
                         ward_class,
                         event.clone(),
+                        false,
                         ctx.entities().get_by_index(ev.entity_idx as usize)?,
                     )
                 })
@@ -90,11 +91,9 @@ impl Wards {
 
             if old_state != new_state {
                 self.current_life_state.insert(ev.entity_idx, new_state);
-                // created
                 if new_state == 0 {
                     event(WardEvent::Placed)?;
                 }
-                // killed / expired
                 if new_state == 1 {
                     if let Some(killer) = self.killers.get_mut(&ward_class).unwrap().pop_front() {
                         event(WardEvent::Killed(killer.clone()))?;
@@ -110,7 +109,7 @@ impl Wards {
     #[on_entity]
     fn on_entity(&mut self, event: EntityEvents, entity: &Entity) -> ObserverResult {
         if event == EntityEvents::Created && WardClass::from_class_name(entity.class().name()).is_some() {
-            if let Ok(life_state) = entity.get_property_by_name("m_lifeState") {
+            if let Ok(life_state) = entity.get_property("m_lifeState") {
                 self.current_life_state.remove(&entity.index());
                 self.pending_events.push_back(PendingEvent {
                     entity_idx: entity.index(),
@@ -119,7 +118,7 @@ impl Wards {
             }
         }
         if event == EntityEvents::Updated && self.current_life_state.contains_key(&entity.index()) {
-            if let Ok(life_state) = entity.get_property_by_name("m_lifeState") {
+            if let Ok(life_state) = entity.get_property("m_lifeState") {
                 self.pending_events.push_back(PendingEvent {
                     entity_idx: entity.index(),
                     life_state: life_state.try_into()?,
@@ -157,13 +156,28 @@ impl Wards {
 
     #[on_stop]
     fn on_stop(&mut self, ctx: &Context) -> ObserverResult {
-        self.current_life_state.iter().for_each(|state| {
-            self.pending_events.push_back(PendingEvent {
-                entity_idx: *state.0,
-                life_state: 1,
-            })
-        });
-        self.on_tick_end(ctx)
+        let active = self
+            .current_life_state
+            .iter()
+            .filter_map(|(entity_idx, life_state)| (*life_state == 0).then_some(*entity_idx))
+            .collect::<Vec<_>>();
+
+        for entity_idx in active {
+            let ward_class =
+                WardClass::from_class_name(ctx.entities().get_by_index(entity_idx as usize)?.class().name()).unwrap();
+
+            self.observers.iter().try_for_each(|observer| {
+                observer.borrow_mut().on_ward(
+                    ctx,
+                    ward_class,
+                    WardEvent::Expired,
+                    true,
+                    ctx.entities().get_by_index(entity_idx as usize)?,
+                )
+            })?;
+        }
+
+        Ok(())
     }
 }
 
@@ -184,7 +198,14 @@ impl Default for Wards {
 
 #[allow(unused_variables)]
 pub trait WardsObserver {
-    fn on_ward(&mut self, ctx: &Context, ward_class: WardClass, event: WardEvent, ward: &Entity) -> ObserverResult {
+    fn on_ward(
+        &mut self,
+        ctx: &Context,
+        ward_class: WardClass,
+        event: WardEvent,
+        post_game: bool,
+        ward: &Entity,
+    ) -> ObserverResult {
         Ok(())
     }
 }
