@@ -7,15 +7,15 @@ Shared Dota 2 replay parsing and ward vision metrics for Wardmap.
 Requires Rust.
 
 ```bash
-cargo build --locked
+cargo build
 ```
 
 ## Checks
 
 ```bash
 cargo fmt --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
 ## License
