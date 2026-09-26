@@ -34,8 +34,10 @@ impl VisionGrid {
         if !position.iter().all(|coordinate| coordinate.is_finite()) {
             return false;
         }
+
         let column = ((position[0] - GRID_WORLD_ORIGIN) / GRID_SIZE).round() as i32;
         let row = ((position[1] - GRID_WORLD_ORIGIN) / GRID_SIZE).round() as i32;
+
         self.cell(column, row).is_some()
     }
 
@@ -59,6 +61,7 @@ impl VisionGrid {
 
         let delta_x = (target_column - source_column) as f32 * GRID_SIZE;
         let delta_y = (target_row - source_row) as f32 * GRID_SIZE;
+
         if delta_x.hypot(delta_y) > radius as f32 {
             return false;
         }
@@ -95,9 +98,10 @@ impl VisionGrid {
             let decision = (1 + 2 * completed_columns) * row_steps - (1 + 2 * completed_rows) * column_steps;
 
             if decision == 0 {
-                if !self.cell_is_clear(column + column_direction, row, eye_height)
-                    || !self.cell_is_clear(column, row + row_direction, eye_height)
-                {
+                let horizontal_clear = self.cell_is_clear(column + column_direction, row, eye_height);
+                let vertical_clear = self.cell_is_clear(column, row + row_direction, eye_height);
+
+                if !horizontal_clear || !vertical_clear {
                     return false;
                 }
 

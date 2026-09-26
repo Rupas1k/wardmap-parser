@@ -65,7 +65,7 @@ pub struct Wards {
 #[observer]
 impl Wards {
     pub fn register_observer<T: WardsObserver + 'static>(&mut self, obs: Rc<RefCell<T>>) {
-        self.observers.push(obs as Rc<RefCell<dyn WardsObserver>>)
+        self.observers.push(obs as Rc<RefCell<dyn WardsObserver>>);
     }
 
     #[on_tick_end]
@@ -74,8 +74,11 @@ impl Wards {
             let old_state = *self.current_life_state.get(&ev.entity_idx).unwrap_or(&2);
             let new_state = ev.life_state;
 
-            let ward_class =
-                WardClass::from_class_name(ctx.entities().get_by_index(ev.entity_idx as usize)?.class().name()).unwrap();
+            let Some(ward_class) =
+                WardClass::from_class_name(ctx.entities().get_by_index(ev.entity_idx as usize)?.class().name())
+            else {
+                continue;
+            };
 
             let event = |event: WardEvent| -> ObserverResult {
                 self.observers.iter().try_for_each(|obs| {
@@ -95,7 +98,7 @@ impl Wards {
                     event(WardEvent::Placed)?;
                 }
                 if new_state == 1 {
-                    if let Some(killer) = self.killers.get_mut(&ward_class).unwrap().pop_front() {
+                    if let Some(killer) = self.killers.entry(ward_class).or_default().pop_front() {
                         event(WardEvent::Killed(killer.clone()))?;
                     } else {
                         event(WardEvent::Expired)?;
@@ -103,6 +106,7 @@ impl Wards {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -117,6 +121,7 @@ impl Wards {
                 });
             }
         }
+
         if event == EntityEvents::Updated && self.current_life_state.contains_key(&entity.index()) {
             if let Ok(life_state) = entity.get_property("m_lifeState") {
                 self.pending_events.push_back(PendingEvent {
@@ -125,6 +130,7 @@ impl Wards {
                 });
             }
         }
+
         if event == EntityEvents::Deleted && self.current_life_state.contains_key(&entity.index()) {
             self.current_life_state.remove(&entity.index());
         }
@@ -133,24 +139,22 @@ impl Wards {
 
     #[on_combat_log]
     fn on_combat_log(&mut self, combat_log: &CombatLogEntry) -> ObserverResult {
-        if combat_log.r#type() == DotaCombatlogTypes::DotaCombatlogDeath
-            && combat_log.target_name().is_ok()
-            && WardClass::from_target_name(combat_log.target_name()?).is_some()
-        {
-            if let (Ok(killer), Ok(attacker)) = (combat_log.damage_source_name(), combat_log.attacker_name()) {
-                if WardClass::from_target_name(attacker).is_none() {
-                    self.killers
-                        .get_mut(&WardClass::from_target_name(combat_log.target_name()?).unwrap())
-                        .unwrap()
-                        .push_back(killer.into());
-                }
-            } else {
-                self.killers
-                    .get_mut(&WardClass::from_target_name(combat_log.target_name()?).unwrap())
-                    .unwrap()
-                    .push_back(combat_log.damage_source_name()?.into());
-            }
+        if combat_log.r#type() != DotaCombatlogTypes::DotaCombatlogDeath {
+            return Ok(());
         }
+
+        let target_name = combat_log.target_name()?;
+        let Some(ward_class) = WardClass::from_target_name(target_name) else {
+            return Ok(());
+        };
+
+        let killer = match (combat_log.damage_source_name(), combat_log.attacker_name()) {
+            (Ok(killer), Ok(attacker)) if WardClass::from_target_name(attacker).is_none() => killer,
+            _ => combat_log.damage_source_name()?,
+        };
+
+        self.killers.entry(ward_class).or_default().push_back(killer.into());
+
         Ok(())
     }
 
@@ -163,8 +167,10 @@ impl Wards {
             .collect::<Vec<_>>();
 
         for entity_idx in active {
-            let ward_class =
-                WardClass::from_class_name(ctx.entities().get_by_index(entity_idx as usize)?.class().name()).unwrap();
+            let entity = ctx.entities().get_by_index(entity_idx as usize)?;
+            let Some(ward_class) = WardClass::from_class_name(entity.class().name()) else {
+                continue;
+            };
 
             self.observers.iter().try_for_each(|observer| {
                 observer.borrow_mut().on_ward(

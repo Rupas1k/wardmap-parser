@@ -10,7 +10,7 @@ use crate::observers::game_time::*;
 use crate::observers::players::*;
 use crate::observers::vision::*;
 use crate::observers::wards::*;
-use crate::output::{Output, Replay, ReplayMetadata, ReplayPlayer, VisionSample};
+use crate::output::{Output, Replay, ReplayMetadata, ReplayPlayer};
 
 #[derive(Debug, Copy, Clone)]
 struct WardEntry {
@@ -22,6 +22,46 @@ struct WardEntry {
     dire_networth: i32,
 }
 
+#[derive(Debug, Clone)]
+struct ResultEvidence {
+    handle: u32,
+    placed_at_seconds: f64,
+    ended_at_seconds: f64,
+    outcome: &'static str,
+    outcome_reason: &'static str,
+}
+
+fn ended_at_expected_lifetime(entry: WardEntry, tick: i32) -> bool {
+    let lifetime = if entry.is_observer { 360.0 } else { 420.0 };
+    let age = (tick - entry.placed_tick) as f64 / 30.0;
+
+    (age - lifetime).abs() <= 0.25
+}
+
+fn shift_time(value: &mut serde_json::Value, start: f64) {
+    if let Some(time) = value.as_f64() {
+        *value = (time - start).into();
+    }
+}
+
+fn shift_sighting_times(sighting: &mut serde_json::Value, start: f64) {
+    shift_time(&mut sighting["time"], start);
+
+    let Some(segments) = sighting.get_mut("segments").and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+
+    for segment in segments {
+        shift_time(&mut segment["time"], start);
+
+        if let Some(route) = segment.get_mut("route").and_then(serde_json::Value::as_array_mut) {
+            for point in route {
+                shift_time(&mut point["time"], start);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct App {
     game_time: Rc<RefCell<GameTime>>,
@@ -31,7 +71,7 @@ struct App {
     handle_to_entry: HashMap<u32, WardEntry>,
     pending_entries: VecDeque<(Entity, i32, WardEvent, bool)>,
     result: Vec<Output>,
-    result_handles: Vec<u32>,
+    result_evidence: Vec<ResultEvidence>,
 }
 
 #[observer]
@@ -52,6 +92,7 @@ impl App {
             let duration = (((tick - entry.placed_tick) as f32) / 30.0).round() as i32;
             let time_placed = (entry.placed_tick as f32 / 30.0 - start_time).round() as i32;
             let hero_placed = ctx.entities().get_by_handle(entry.hero_handle)?.class().name();
+
             let vision_metrics = self.vision.borrow().ward_metrics(handle);
             let player_destroyed_steam_id = match &event {
                 WardEvent::Killed(killer) => self
@@ -62,6 +103,28 @@ impl App {
                     .map(|player| player.borrow().id),
                 _ => None,
             };
+
+            let expected_expiry = ended_at_expected_lifetime(entry, tick);
+            let (outcome, outcome_reason) = match &event {
+                _ if expected_expiry => ("expired", "expected_lifetime"),
+                WardEvent::Killed(killer) => self
+                    .players
+                    .borrow()
+                    .hero_to_player
+                    .get(killer)
+                    .map(|player| player.borrow().team == if entry.is_radiant { 2 } else { 3 })
+                    .map_or(("unknown", "unknown_killer"), |allied| {
+                        if allied {
+                            ("allied_removed", "combat_log")
+                        } else {
+                            ("dewarded", "combat_log")
+                        }
+                    }),
+                WardEvent::Expired if post_game => ("match_ended", "match_end"),
+                WardEvent::Expired => ("unknown", "entity_removal"),
+                WardEvent::Placed => ("unknown", "entity_event"),
+            };
+
             let npc_killed = match &event {
                 WardEvent::Killed(killer) => Some(killer.to_string()),
                 _ => None,
@@ -103,8 +166,16 @@ impl App {
                 scouting_version: None,
                 scouting_tau_seconds: None,
                 scouting_complete: None,
+                measurement_json: None,
             });
-            self.result_handles.push(handle);
+
+            self.result_evidence.push(ResultEvidence {
+                handle,
+                placed_at_seconds: entry.placed_tick as f64 / 30.0 - start_time as f64,
+                ended_at_seconds: tick as f64 / 30.0 - start_time as f64,
+                outcome,
+                outcome_reason,
+            });
         }
 
         Ok(())
@@ -203,11 +274,13 @@ pub fn parse_replay(data: &[u8]) -> anyhow::Result<Replay> {
     parser.run_to_end()?;
     app.borrow_mut().tick_end(parser.context())?;
 
+    let metadata = replay_metadata(parser.replay_info(), parser.context());
+
     let app = app.borrow();
     let vision = app.vision.borrow();
     let mut result = app.result.clone();
-    for (output, handle) in result.iter_mut().zip(&app.result_handles) {
-        let metrics = vision.ward_metrics(*handle);
+    for (output, evidence) in result.iter_mut().zip(&app.result_evidence) {
+        let metrics = vision.ward_metrics(evidence.handle);
         output.enemy_hero_vision_seconds = metrics.enemy_hero_seconds as f32;
         output.unique_enemy_hero_vision_seconds = metrics.unique_enemy_hero_seconds as f32;
         output.heroes_spotted = metrics.heroes_spotted;
@@ -219,14 +292,145 @@ pub fn parse_replay(data: &[u8]) -> anyhow::Result<Replay> {
             output.scouting_score = Some(metrics.scouting_score());
             output.scouting_version = Some(SCOUTING_VERSION);
             output.scouting_tau_seconds = Some(DISCOVERY_TAU_SECONDS);
-            output.scouting_complete = Some(vision.scouting_complete(*handle));
+            output.scouting_complete = Some(vision.scouting_complete(evidence.handle));
+        }
+
+        let mut measurement = serde_json::to_value(vision.measurement(evidence.handle))?;
+        let object = measurement
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("Ward measurement did not serialize as an object"))?;
+        object.insert("revision".to_owned(), 2.into());
+        if let Some(intervals) = object.get_mut("intervals").and_then(serde_json::Value::as_array_mut) {
+            let start = app.game_time.borrow().start_time()? as f64;
+            for interval in intervals {
+                for key in ["start", "end"] {
+                    if let Some(time) = interval[key].as_f64() {
+                        interval[key] = (time - start).into();
+                    }
+                }
+            }
+        }
+        if let Some(sightings) = object.get_mut("sightings").and_then(serde_json::Value::as_array_mut) {
+            let start = app.game_time.borrow().start_time()? as f64;
+            for sighting in sightings {
+                shift_sighting_times(sighting, start);
+            }
+        }
+        object.insert("placed_at_seconds".to_owned(), evidence.placed_at_seconds.into());
+        let ended_at = metadata
+            .game_duration_seconds
+            .map(f64::from)
+            .map_or(evidence.ended_at_seconds, |game_end| evidence.ended_at_seconds.min(game_end));
+        object.insert("ended_at_seconds".to_owned(), ended_at.into());
+        if output.is_obs {
+            let eligible = (ended_at - evidence.placed_at_seconds).max(0.0) * 5.0;
+            let known = object
+                .get("vision_measured_seconds")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+                .min(eligible);
+            object.insert("vision_possible_seconds".to_owned(), eligible.into());
+            object.insert("vision_measured_seconds".to_owned(), known.into());
+            object.insert(
+                "vision_coverage".to_owned(),
+                if eligible > 0.0 {
+                    (known / eligible).into()
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+        }
+        let ambiguous = app.result.iter().zip(&app.result_evidence).any(|(other, other_evidence)| {
+            other_evidence.handle != evidence.handle
+                && other.is_obs == output.is_obs
+                && other.is_radiant == output.is_radiant
+                && (other_evidence.ended_at_seconds - evidence.ended_at_seconds).abs() <= 0.5
+        });
+        let (outcome, outcome_reason) = if metadata.game_duration_seconds.is_none() && evidence.outcome == "match_ended" {
+            ("replay_ended", "replay_end")
+        } else if metadata
+            .game_duration_seconds
+            .is_some_and(|game_end| evidence.ended_at_seconds > f64::from(game_end))
+        {
+            ("match_ended", "match_end")
+        } else if ambiguous && matches!(evidence.outcome, "dewarded" | "allied_removed") {
+            ("unknown", "ambiguous_removal")
+        } else {
+            (evidence.outcome, evidence.outcome_reason)
+        };
+        object.insert("outcome".to_owned(), outcome.into());
+        object.insert("outcome_reason".to_owned(), outcome_reason.into());
+        object.insert(
+            "vision_complete".to_owned(),
+            (output.is_obs
+                && object
+                    .get("vision_coverage")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|coverage| coverage >= 1.0 - 1e-9))
+            .into(),
+        );
+        if !output.is_obs {
+            object.insert("added_vision_seconds".to_owned(), serde_json::Value::Null);
+            object.insert("fresh_sightings".to_owned(), serde_json::Value::Null);
+            object.insert("vision_coverage".to_owned(), serde_json::Value::Null);
+        }
+        output.measurement_json = Some(serde_json::to_string(&measurement)?);
+    }
+
+    Ok(Replay { metadata, wards: result })
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    fn ward_entry(is_observer: bool) -> WardEntry {
+        WardEntry {
+            hero_handle: 0,
+            placed_tick: 1_000,
+            is_radiant: true,
+            is_observer,
+            radiant_networth: 0,
+            dire_networth: 0,
         }
     }
 
-    Ok(Replay {
-        metadata: replay_metadata(parser.replay_info(), parser.context()),
-        wards: result,
-    })
+    #[test]
+    fn recognizes_expected_observer_lifetime() {
+        let entry = ward_entry(true);
+
+        assert!(ended_at_expected_lifetime(entry, 1_000 + 360 * 30));
+        assert!(!ended_at_expected_lifetime(entry, 1_000 + 359 * 30));
+    }
+
+    #[test]
+    fn recognizes_expected_sentry_lifetime() {
+        let entry = ward_entry(false);
+
+        assert!(ended_at_expected_lifetime(entry, 1_000 + 420 * 30));
+        assert!(!ended_at_expected_lifetime(entry, 1_000 + 419 * 30));
+    }
+
+    #[test]
+    fn shifts_all_sighting_times_to_game_time() {
+        let mut sighting = serde_json::json!({
+            "time": 1000.0,
+            "segments": [{
+                "time": 1000.0,
+                "route": [
+                    {"time": 1000.0},
+                    {"time": 1001.5}
+                ]
+            }]
+        });
+
+        shift_sighting_times(&mut sighting, 900.0);
+
+        assert_eq!(sighting["time"], 100.0);
+        assert_eq!(sighting["segments"][0]["time"], 100.0);
+        assert_eq!(sighting["segments"][0]["route"][0]["time"], 100.0);
+        assert_eq!(sighting["segments"][0]["route"][1]["time"], 101.5);
+    }
 }
 
 fn replay_metadata(info: &source2_demo::proto::CDemoFileInfo, ctx: &Context) -> ReplayMetadata {
@@ -239,7 +443,7 @@ fn replay_metadata(info: &source2_demo::proto::CDemoFileInfo, ctx: &Context) -> 
             let start: f32 = try_property!(rules, "m_pGameRules.m_flGameStartTime")?;
             let end: f32 = try_property!(rules, "m_pGameRules.m_flGameEndTime")?;
 
-            (end >= start).then_some(end - start)
+            (start.is_finite() && end.is_finite() && end > 0.0 && end >= start).then_some(end - start)
         });
     let players = game
         .into_iter()
@@ -272,21 +476,4 @@ fn replay_metadata(info: &source2_demo::proto::CDemoFileInfo, ctx: &Context) -> 
         end_time: game.and_then(|game| game.end_time),
         players,
     }
-}
-
-pub fn parse_vision(data: &[u8]) -> anyhow::Result<Vec<VisionSample>> {
-    let mut parser = Parser::new(data)?;
-
-    let game_time = parser.register_observer::<GameTime>();
-    let players = parser.register_observer::<Players>();
-    let vision = parser.register_observer::<Vision>();
-
-    vision.borrow_mut().set_dependencies(game_time, players);
-    vision.borrow_mut().enable_samples();
-
-    parser.run_to_end()?;
-
-    let samples = vision.borrow().samples.clone();
-
-    Ok(samples)
 }

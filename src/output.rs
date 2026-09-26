@@ -61,20 +61,5 @@ pub struct Output {
     pub scouting_version: Option<i16>,
     pub scouting_tau_seconds: Option<f64>,
     pub scouting_complete: Option<bool>,
-}
-
-#[derive(Clone, Debug)]
-pub struct VisionSample {
-    pub time: i32,
-    pub game_time_seconds: f64,
-    pub target_player_steam_id: u64,
-    pub target_is_radiant: bool,
-    pub observing_is_radiant: bool,
-    pub is_alive: bool,
-    pub visible_by_enemy: bool,
-    pub provider_count: u16,
-    pub provider_kinds: Vec<String>,
-    pub ward_provider_handles: Vec<u32>,
-    pub has_non_ward_provider: bool,
-    pub visibility_known: bool,
+    pub measurement_json: Option<String>,
 }

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use source2_demo::prelude::*;
@@ -7,14 +7,12 @@ use source2_demo::proto::DotaCombatlogTypes;
 
 mod grid;
 use grid::VisionGrid;
-mod metrics;
-use metrics::{Observation, Sight, VisionMetrics, SAMPLE_INTERVAL_TICKS};
-pub use metrics::{WardVisionMetrics, DISCOVERY_TAU_SECONDS, SCOUTING_VERSION};
+pub(crate) mod metrics;
+use metrics::{Observation, PlayerObservation, Sight, VisionMetrics, SAMPLE_INTERVAL_TICKS};
+pub use metrics::{WardMeasurement, WardVisionMetrics, DISCOVERY_TAU_SECONDS, SCOUTING_VERSION};
 
 use crate::observers::game_time::GameTime;
 use crate::observers::players::Players;
-use crate::VisionSample;
-
 const RADIANT: i32 = 2;
 const DIRE: i32 = 3;
 const WATCHER_VISION_RANGE: i32 = 800;
@@ -27,23 +25,20 @@ pub struct Vision {
     provider_handles: HashSet<u32>,
     next_sample_tick: Option<i32>,
     metrics: VisionMetrics,
+    measured_metrics: VisionMetrics,
+    measurement_finished: bool,
+    invisible_modifiers: HashSet<(u8, String)>,
     providers_changed: bool,
     previous_sample_tick: Option<i32>,
     active_observers: HashSet<u32>,
     incomplete_wards: HashSet<u32>,
-    smoked_heroes: HashSet<u64>,
-    collect_samples: bool,
-    pub samples: Vec<VisionSample>,
+    smoked_heroes: HashSet<u8>,
 }
 
 impl Vision {
     pub fn set_dependencies(&mut self, game_time: Rc<RefCell<GameTime>>, players: Rc<RefCell<Players>>) {
         self.game_time = game_time;
         self.players = players;
-    }
-
-    pub fn enable_samples(&mut self) {
-        self.collect_samples = true;
     }
 
     pub fn ward_metrics(&self, handle: u32) -> WardVisionMetrics {
@@ -54,7 +49,11 @@ impl Vision {
         !self.incomplete_wards.contains(&handle)
     }
 
-    fn sample(&mut self, ctx: &Context, tick: i32, start_time: Option<f32>) {
+    pub fn measurement(&self, handle: u32) -> WardMeasurement {
+        self.measured_metrics.measurement(handle)
+    }
+
+    fn sample(&mut self, ctx: &Context, tick: i32) {
         let is_day = self.is_day(ctx);
         let providers_known = self.provider_handles.iter().all(|handle| {
             ctx.entities().get_by_handle(*handle as usize).is_ok_and(|entity| {
@@ -70,6 +69,7 @@ impl Vision {
             .filter_map(|handle| ctx.entities().get_by_handle(*handle as usize).ok())
             .filter_map(|entity| ActiveProvider::from_entity(entity, is_day))
             .collect::<Vec<_>>();
+
         let active_observers = self
             .provider_handles
             .iter()
@@ -81,37 +81,38 @@ impl Vision {
             .copied()
             .collect::<HashSet<_>>();
         let players = self.players.borrow();
-        let game_time_seconds = start_time.map(|start| tick as f64 / 30.0 - start as f64);
         let mut observations = Vec::with_capacity(players.players.len());
 
         for player in &players.players {
             let player = player.borrow();
             let Ok(hero) = ctx.entities().get_by_handle(player.handle) else {
-                observations.push((player.id, Observation::Unknown));
+                observations.push(PlayerObservation {
+                    slot: player.slot,
+                    steam_id: (player.id != 0).then_some(player.id),
+                    hero_name: String::new(),
+                    team: player.team,
+                    position: None,
+                    state: Observation::Unknown,
+                });
                 continue;
             };
 
             let is_alive = is_alive(hero);
             let position = entity_position(hero);
             let enemy_team = if player.team == RADIANT { DIRE } else { RADIANT };
-            let mut provider_kinds = BTreeSet::new();
-            let mut provider_count = 0_u16;
             let mut ward_providers = Vec::new();
             let mut has_non_ward_provider = false;
 
-            if is_alive && !self.smoked_heroes.contains(&player.id) {
-                if let Some(target_position) = position {
-                    for provider in providers.iter().filter(|provider| provider.team == enemy_team) {
-                        if self.grid.can_see(provider.position, target_position, provider.range) {
-                            provider_count = provider_count.saturating_add(1);
-                            provider_kinds.insert(provider.kind.to_string());
+            if let Some(target_position) = position.filter(|_| is_alive && !self.smoked_heroes.contains(&player.slot)) {
+                for provider in providers.iter().filter(|provider| provider.team == enemy_team) {
+                    if !self.grid.can_see(provider.position, target_position, provider.range) {
+                        continue;
+                    }
 
-                            if provider.kind == "observer_ward" {
-                                ward_providers.push(provider.handle);
-                            } else {
-                                has_non_ward_provider = true;
-                            }
-                        }
+                    if provider.is_observer {
+                        ward_providers.push(provider.handle);
+                    } else {
+                        has_non_ward_provider = true;
                     }
                 }
             }
@@ -129,35 +130,60 @@ impl Vision {
                     non_ward: has_non_ward_provider,
                 })
             };
-            observations.push((player.id, observation));
 
-            if let Some(game_time_seconds) = game_time_seconds.filter(|_| self.collect_samples) {
-                self.samples.push(VisionSample {
-                    time: game_time_seconds as i32,
-                    game_time_seconds,
-                    target_player_steam_id: player.id,
-                    target_is_radiant: player.team == RADIANT,
-                    observing_is_radiant: enemy_team == RADIANT,
-                    is_alive,
-                    visible_by_enemy: provider_count > 0,
-                    provider_count,
-                    provider_kinds: provider_kinds.into_iter().collect(),
-                    ward_provider_handles: ward_providers,
-                    has_non_ward_provider,
-                    visibility_known,
-                });
-            }
+            observations.push(PlayerObservation {
+                slot: player.slot,
+                steam_id: (player.id != 0).then_some(player.id),
+                hero_name: hero.class().name().to_owned(),
+                team: player.team,
+                position,
+                state: observation,
+            });
         }
+
         let has_gap = self
             .previous_sample_tick
             .is_some_and(|previous| tick < previous || tick - previous > SAMPLE_INTERVAL_TICKS);
-        if has_gap || !providers_known || observations.iter().any(|(_, state)| matches!(state, Observation::Unknown)) {
+        let measurement_is_incomplete = has_gap
+            || !providers_known
+            || observations
+                .iter()
+                .any(|observation| matches!(observation.state, Observation::Unknown));
+
+        if measurement_is_incomplete {
             self.incomplete_wards.extend(&self.active_observers);
             self.incomplete_wards.extend(&active_observers);
         }
         self.previous_sample_tick = Some(tick);
         self.active_observers = active_observers;
-        self.metrics.sample(tick as f64 / 30.0, observations);
+        let active_wards = providers
+            .iter()
+            .filter(|provider| provider.is_observer)
+            .map(|provider| (provider.handle, provider.team))
+            .collect::<Vec<_>>();
+        let time = tick as f64 / 30.0;
+
+        self.metrics.sample_at_tick(tick, time, observations.clone(), &active_wards);
+
+        if !self.measurement_finished {
+            for observation in &mut observations {
+                if self.invisible_modifiers.iter().any(|(slot, _)| *slot == observation.slot) {
+                    observation.state = Observation::Unknown;
+                }
+            }
+            let end = ctx
+                .entities()
+                .get_by_class_name("CDOTAGamerulesProxy")
+                .ok()
+                .and_then(|rules| try_property!(rules, f32, "m_pGameRules.m_flGameEndTime"))
+                .filter(|end| end.is_finite() && *end > 0.0)
+                .map(f64::from);
+            let measurement_time = end.map_or(time, |end| time.min(end));
+
+            self.measured_metrics
+                .sample_at_tick(tick, measurement_time, observations, &active_wards);
+            self.measurement_finished = end.is_some_and(|end| time >= end);
+        }
     }
 
     fn is_day(&self, ctx: &Context) -> bool {
@@ -229,15 +255,13 @@ impl Vision {
             return Ok(());
         };
 
-        let start_time = self.game_time.borrow().start_time().ok();
-
         if !self.providers_changed && self.next_sample_tick.is_some_and(|next| tick < next) {
             return Ok(());
         }
 
         self.next_sample_tick = Some(tick + SAMPLE_INTERVAL_TICKS);
         self.providers_changed = false;
-        self.sample(ctx, tick, start_time);
+        self.sample(ctx, tick);
 
         Ok(())
     }
@@ -255,7 +279,10 @@ impl Vision {
             return Ok(());
         }
 
-        if combat_log.inflictor_name().ok() != Some("modifier_smoke_of_deceit") {
+        let modifier = combat_log.inflictor_name().unwrap_or("");
+        let smoke = modifier == "modifier_smoke_of_deceit";
+
+        if !smoke && combat_log.log().invisibility_modifier != Some(true) {
             return Ok(());
         }
 
@@ -267,7 +294,20 @@ impl Vision {
             return Ok(());
         };
 
-        let player_id = player.borrow().id;
+        let player_id = player.borrow().slot;
+
+        if !smoke {
+            if combat_log.log().is_target_illusion != Some(true) {
+                let key = (player_id, modifier.to_owned());
+                if event == DotaCombatlogTypes::DotaCombatlogModifierAdd {
+                    self.invisible_modifiers.insert(key);
+                } else {
+                    self.invisible_modifiers.remove(&key);
+                }
+                self.providers_changed = true;
+            }
+            return Ok(());
+        }
 
         if event == DotaCombatlogTypes::DotaCombatlogModifierAdd {
             self.smoked_heroes.insert(player_id);
@@ -279,17 +319,16 @@ impl Vision {
         Ok(())
     }
 }
-
-struct ActiveProvider<'a> {
+struct ActiveProvider {
     handle: u32,
     team: i32,
     range: i32,
     position: [f32; 3],
-    kind: &'a str,
+    is_observer: bool,
 }
 
-impl<'a> ActiveProvider<'a> {
-    fn from_entity(entity: &'a Entity, is_day: bool) -> Option<Self> {
+impl ActiveProvider {
+    fn from_entity(entity: &Entity, is_day: bool) -> Option<Self> {
         if !is_alive(entity) {
             return None;
         }
@@ -317,7 +356,7 @@ impl<'a> ActiveProvider<'a> {
             team,
             range,
             position: entity_position(entity)?,
-            kind: provider_kind(class_name),
+            is_observer: class_name == "CDOTA_NPC_Observer_Ward",
         })
     }
 }
@@ -339,8 +378,10 @@ fn is_provider_candidate(entity: &Entity) -> bool {
 }
 
 fn is_alive(entity: &Entity) -> bool {
-    try_property!(entity, i32, "m_lifeState").is_none_or(|state| state == 0)
-        && try_property!(entity, i32, "m_iHealth").is_none_or(|health| health > 0)
+    let is_alive = try_property!(entity, i32, "m_lifeState").is_none_or(|state| state == 0);
+    let has_health = try_property!(entity, i32, "m_iHealth").is_none_or(|health| health > 0);
+
+    is_alive && has_health
 }
 
 fn entity_position(entity: &Entity) -> Option<[f32; 3]> {
@@ -356,36 +397,4 @@ fn entity_position(entity: &Entity) -> Option<[f32; 3]> {
         cell_y as f32 * 128.0 + offset_y,
         cell_z as f32 * 128.0 + offset_z,
     ])
-}
-
-fn provider_kind(class_name: &str) -> &'static str {
-    if class_name.starts_with("CDOTA_Unit_Hero_") {
-        "hero"
-    } else if matches!(class_name, "CDOTA_BaseNPC_Creep_Lane" | "CDOTA_BaseNPC_Creep_Siege") {
-        "lane_creep"
-    } else if class_name == "CDOTA_BaseNPC_Creep_Neutral" {
-        "controlled_neutral"
-    } else if class_name == "CDOTA_NPC_Observer_Ward" {
-        "observer_ward"
-    } else if class_name == "CDOTA_BaseNPC_Tower" {
-        "tower"
-    } else if class_name == "CDOTA_BaseNPC_Watch_Tower" {
-        "watcher"
-    } else if class_name == "CDOTA_Unit_Courier" {
-        "courier"
-    } else if class_name == "CDOTA_Unit_Roshans_Banner" {
-        "roshan_banner"
-    } else if matches!(
-        class_name,
-        "CDOTA_BaseNPC_Barracks"
-            | "CDOTA_BaseNPC_Effigy_Statue"
-            | "CDOTA_BaseNPC_Filler"
-            | "CDOTA_BaseNPC_Fort"
-            | "CDOTA_NPC_BaseBlocker"
-            | "CDOTA_Unit_Fountain"
-    ) {
-        "building"
-    } else {
-        "controlled_unit"
-    }
 }

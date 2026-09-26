@@ -1,8 +1,9 @@
-mod observers;
+pub(crate) mod observers;
 mod output;
 mod replay;
 
-pub mod utils;
+#[cfg(test)]
+mod tests;
 
-pub use output::{Output, Replay, ReplayMetadata, ReplayPlayer, VisionSample};
-pub use replay::{parse_replay, parse_vision};
+pub use output::{Output, Replay, ReplayMetadata, ReplayPlayer};
+pub use replay::parse_replay;
