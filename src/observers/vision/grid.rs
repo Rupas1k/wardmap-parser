@@ -1,22 +1,20 @@
-const GRID_SIZE: f32 = 64.0;
-const NETWORK_COORDINATE_BIAS: f32 = 128.0 * 128.0;
-const EXPORTED_WORLD_MIN: f32 = -8923.0;
-const GRID_WORLD_ORIGIN: f32 = NETWORK_COORDINATE_BIAS + EXPORTED_WORLD_MIN;
-const WORLD_Z_ORIGIN: f32 = NETWORK_COORDINATE_BIAS;
-
-const MAP_DATA: &[u8] = include_bytes!("../../../assets/elevations/2.bin");
+use crate::MapData;
 
 pub struct VisionGrid {
     rows: usize,
     columns: usize,
     cells: Vec<i16>,
+    grid_size: f32,
+    world_origin: f32,
+    z_origin: f32,
 }
 
-impl Default for VisionGrid {
-    fn default() -> Self {
-        let rows = u16::from_be_bytes([MAP_DATA[0], MAP_DATA[1]]) as usize;
-        let columns = u16::from_be_bytes([MAP_DATA[2], MAP_DATA[3]]) as usize;
-        let cells = MAP_DATA[4..]
+impl VisionGrid {
+    pub fn new(map: MapData) -> Self {
+        let data = map.elevations();
+        let rows = u16::from_be_bytes([data[0], data[1]]) as usize;
+        let columns = u16::from_be_bytes([data[2], data[3]]) as usize;
+        let cells = data[4..]
             .as_chunks::<2>()
             .0
             .iter()
@@ -25,18 +23,23 @@ impl Default for VisionGrid {
 
         debug_assert_eq!(cells.len(), rows * columns);
 
-        Self { rows, columns, cells }
+        Self {
+            rows,
+            columns,
+            cells,
+            grid_size: map.grid_size(),
+            world_origin: map.world_origin(),
+            z_origin: map.z_origin(),
+        }
     }
-}
 
-impl VisionGrid {
     pub fn contains(&self, position: [f32; 3]) -> bool {
         if !position.iter().all(|coordinate| coordinate.is_finite()) {
             return false;
         }
 
-        let column = ((position[0] - GRID_WORLD_ORIGIN) / GRID_SIZE).round() as i32;
-        let row = ((position[1] - GRID_WORLD_ORIGIN) / GRID_SIZE).round() as i32;
+        let column = ((position[0] - self.world_origin) / self.grid_size).round() as i32;
+        let row = ((position[1] - self.world_origin) / self.grid_size).round() as i32;
 
         self.cell(column, row).is_some()
     }
@@ -46,21 +49,21 @@ impl VisionGrid {
             return false;
         }
 
-        let source_x = source[0] - GRID_WORLD_ORIGIN;
-        let source_y = source[1] - GRID_WORLD_ORIGIN;
-        let target_x = target[0] - GRID_WORLD_ORIGIN;
-        let target_y = target[1] - GRID_WORLD_ORIGIN;
-        let source_column = (source_x / GRID_SIZE).round() as i32;
-        let source_row = (source_y / GRID_SIZE).round() as i32;
-        let target_column = (target_x / GRID_SIZE).round() as i32;
-        let target_row = (target_y / GRID_SIZE).round() as i32;
+        let source_x = source[0] - self.world_origin;
+        let source_y = source[1] - self.world_origin;
+        let target_x = target[0] - self.world_origin;
+        let target_y = target[1] - self.world_origin;
+        let source_column = (source_x / self.grid_size).round() as i32;
+        let source_row = (source_y / self.grid_size).round() as i32;
+        let target_column = (target_x / self.grid_size).round() as i32;
+        let target_row = (target_y / self.grid_size).round() as i32;
 
         if self.cell(source_column, source_row).is_none() || self.cell(target_column, target_row).is_none() {
             return false;
         }
 
-        let delta_x = (target_column - source_column) as f32 * GRID_SIZE;
-        let delta_y = (target_row - source_row) as f32 * GRID_SIZE;
+        let delta_x = (target_column - source_column) as f32 * self.grid_size;
+        let delta_y = (target_row - source_row) as f32 * self.grid_size;
 
         if delta_x.hypot(delta_y) > radius as f32 {
             return false;
@@ -71,7 +74,7 @@ impl VisionGrid {
             source_row,
             target_column,
             target_row,
-            source[2] - WORLD_Z_ORIGIN,
+            source[2] - self.z_origin,
         )
     }
 

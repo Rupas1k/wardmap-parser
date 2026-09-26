@@ -13,11 +13,11 @@ pub use metrics::{WardMeasurement, WardVisionMetrics, DISCOVERY_TAU_SECONDS, SCO
 
 use crate::observers::game_time::GameTime;
 use crate::observers::players::Players;
+use crate::MapData;
 const RADIANT: i32 = 2;
 const DIRE: i32 = 3;
 const WATCHER_VISION_RANGE: i32 = 800;
 
-#[derive(Default)]
 pub struct Vision {
     game_time: Rc<RefCell<GameTime>>,
     players: Rc<RefCell<Players>>,
@@ -36,6 +36,25 @@ pub struct Vision {
 }
 
 impl Vision {
+    pub fn new(map: MapData) -> Self {
+        Self {
+            game_time: Default::default(),
+            players: Default::default(),
+            grid: VisionGrid::new(map),
+            provider_handles: Default::default(),
+            next_sample_tick: None,
+            metrics: Default::default(),
+            measured_metrics: Default::default(),
+            measurement_finished: false,
+            invisible_modifiers: Default::default(),
+            providers_changed: false,
+            previous_sample_tick: None,
+            active_observers: Default::default(),
+            incomplete_wards: Default::default(),
+            smoked_heroes: Default::default(),
+        }
+    }
+
     pub fn set_dependencies(&mut self, game_time: Rc<RefCell<GameTime>>, players: Rc<RefCell<Players>>) {
         self.game_time = game_time;
         self.players = players;

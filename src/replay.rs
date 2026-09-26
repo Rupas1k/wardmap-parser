@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use source2_demo::prelude::*;
 
+use crate::map_data;
 use crate::observers::game_time::*;
 use crate::observers::players::*;
 use crate::observers::vision::*;
@@ -62,7 +63,6 @@ fn shift_sighting_times(sighting: &mut serde_json::Value, start: f64) {
     }
 }
 
-#[derive(Default)]
 struct App {
     game_time: Rc<RefCell<GameTime>>,
     players: Rc<RefCell<Players>>,
@@ -74,6 +74,19 @@ struct App {
     result_evidence: Vec<ResultEvidence>,
 }
 
+impl App {
+    fn new(vision: Rc<RefCell<Vision>>) -> Self {
+        Self {
+            game_time: Default::default(),
+            players: Default::default(),
+            vision,
+            handle_to_entry: Default::default(),
+            pending_entries: Default::default(),
+            result: Default::default(),
+            result_evidence: Default::default(),
+        }
+    }
+}
 #[observer]
 impl App {
     #[on_tick_end]
@@ -255,21 +268,21 @@ impl App {
     }
 }
 
-pub fn parse_replay(data: &[u8]) -> anyhow::Result<Replay> {
+pub fn parse_replay(data: &[u8], map_version: u8) -> anyhow::Result<Replay> {
+    let map = map_data(map_version).ok_or_else(|| anyhow!("Unsupported map version {map_version}"))?;
     let mut parser = Parser::new(data)?;
 
     let game_time = parser.register_observer::<GameTime>();
     let players = parser.register_observer::<Players>();
     let wards = parser.register_observer::<Wards>();
-    let vision = parser.register_observer::<Vision>();
-    let app = parser.register_observer::<App>();
+    let vision = parser.add_observer(Vision::new(map));
+    let app = parser.add_observer(App::new(vision.clone()));
 
     wards.borrow_mut().register_observer(app.clone());
     vision.borrow_mut().set_dependencies(game_time.clone(), players.clone());
 
     app.borrow_mut().game_time = game_time;
     app.borrow_mut().players = players;
-    app.borrow_mut().vision = vision;
 
     parser.run_to_end()?;
     app.borrow_mut().tick_end(parser.context())?;
