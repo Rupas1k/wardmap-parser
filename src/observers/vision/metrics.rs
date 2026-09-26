@@ -175,11 +175,6 @@ impl VisionMetrics {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn sample(&mut self, time: f64, observations: Vec<PlayerObservation>, active_wards: &[(u32, i32)]) {
-        self.sample_at_tick((time * 30.0).round() as i32, time, observations, active_wards);
-    }
-
     pub fn sample_at_tick(
         &mut self,
         sample_tick: i32,
