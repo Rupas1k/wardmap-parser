@@ -380,6 +380,50 @@ pub fn parse_replay(data: &[u8]) -> anyhow::Result<Replay> {
     Ok(Replay { metadata, wards: result })
 }
 
+fn replay_metadata(info: &source2_demo::proto::CDemoFileInfo, ctx: &Context) -> ReplayMetadata {
+    let game = info.game_info.as_ref().and_then(|info| info.dota.as_ref());
+    let game_duration_seconds = ctx
+        .entities()
+        .get_by_class_name("CDOTAGamerulesProxy")
+        .ok()
+        .and_then(|rules| {
+            let start: f32 = try_property!(rules, "m_pGameRules.m_flGameStartTime")?;
+            let end: f32 = try_property!(rules, "m_pGameRules.m_flGameEndTime")?;
+
+            (start.is_finite() && end.is_finite() && end > 0.0 && end >= start).then_some(end - start)
+        });
+    let players = game
+        .into_iter()
+        .flat_map(|game| &game.player_info)
+        .map(|player| ReplayPlayer {
+            steam_id: player.steamid,
+            name: player
+                .player_name
+                .as_deref()
+                .map(|name| String::from_utf8_lossy(name).trim_end_matches('\0').to_owned()),
+            hero_name: player.hero_name.clone(),
+            team: player.game_team,
+            is_fake_client: player.is_fake_client,
+        })
+        .collect();
+
+    ReplayMetadata {
+        playback_time_seconds: info.playback_time,
+        game_duration_seconds,
+        playback_ticks: info.playback_ticks,
+        playback_frames: info.playback_frames,
+        match_id: game.and_then(|game| game.match_id),
+        game_mode: game.and_then(|game| game.game_mode),
+        game_winner: game.and_then(|game| game.game_winner),
+        league_id: game.and_then(|game| game.leagueid),
+        radiant_team_id: game.and_then(|game| game.radiant_team_id),
+        dire_team_id: game.and_then(|game| game.dire_team_id),
+        radiant_team_tag: game.and_then(|game| game.radiant_team_tag.clone()),
+        dire_team_tag: game.and_then(|game| game.dire_team_tag.clone()),
+        end_time: game.and_then(|game| game.end_time),
+        players,
+    }
+}
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
@@ -430,50 +474,5 @@ mod outcome_tests {
         assert_eq!(sighting["segments"][0]["time"], 100.0);
         assert_eq!(sighting["segments"][0]["route"][0]["time"], 100.0);
         assert_eq!(sighting["segments"][0]["route"][1]["time"], 101.5);
-    }
-}
-
-fn replay_metadata(info: &source2_demo::proto::CDemoFileInfo, ctx: &Context) -> ReplayMetadata {
-    let game = info.game_info.as_ref().and_then(|info| info.dota.as_ref());
-    let game_duration_seconds = ctx
-        .entities()
-        .get_by_class_name("CDOTAGamerulesProxy")
-        .ok()
-        .and_then(|rules| {
-            let start: f32 = try_property!(rules, "m_pGameRules.m_flGameStartTime")?;
-            let end: f32 = try_property!(rules, "m_pGameRules.m_flGameEndTime")?;
-
-            (start.is_finite() && end.is_finite() && end > 0.0 && end >= start).then_some(end - start)
-        });
-    let players = game
-        .into_iter()
-        .flat_map(|game| &game.player_info)
-        .map(|player| ReplayPlayer {
-            steam_id: player.steamid,
-            name: player
-                .player_name
-                .as_deref()
-                .map(|name| String::from_utf8_lossy(name).trim_end_matches('\0').to_owned()),
-            hero_name: player.hero_name.clone(),
-            team: player.game_team,
-            is_fake_client: player.is_fake_client,
-        })
-        .collect();
-
-    ReplayMetadata {
-        playback_time_seconds: info.playback_time,
-        game_duration_seconds,
-        playback_ticks: info.playback_ticks,
-        playback_frames: info.playback_frames,
-        match_id: game.and_then(|game| game.match_id),
-        game_mode: game.and_then(|game| game.game_mode),
-        game_winner: game.and_then(|game| game.game_winner),
-        league_id: game.and_then(|game| game.leagueid),
-        radiant_team_id: game.and_then(|game| game.radiant_team_id),
-        dire_team_id: game.and_then(|game| game.dire_team_id),
-        radiant_team_tag: game.and_then(|game| game.radiant_team_tag.clone()),
-        dire_team_tag: game.and_then(|game| game.dire_team_tag.clone()),
-        end_time: game.and_then(|game| game.end_time),
-        players,
     }
 }
